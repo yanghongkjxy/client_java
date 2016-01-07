@@ -1,5 +1,6 @@
 io.prometheus.benchmark
 io.prometheus.client
+io.prometheus.client.dropwizard
 io.prometheus.client.exporter
 io.prometheus.client.exporter.common
 io.prometheus.client.hotspot

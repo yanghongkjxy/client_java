@@ -1,6 +1,7 @@
 package io.prometheus.client;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -61,10 +62,10 @@ import java.util.Map;
  *   }
  * }
  * </pre>
- * These can be aggregated and processed together much more easily in the Promtheus 
+ * These can be aggregated and processed together much more easily in the Prometheus
  * server than individual metrics for each labelset.
  */
-public class Counter extends SimpleCollector<Counter.Child> {
+public class Counter extends SimpleCollector<Counter.Child> implements Collector.Describable {
 
   Counter(Builder b) {
     super(b);
@@ -75,6 +76,16 @@ public class Counter extends SimpleCollector<Counter.Child> {
     public Counter create() {
       return new Counter(this);
     }
+  }
+
+  /**
+   *  Return a Builder to allow configuration of a new Counter. Ensures required fields are provided.
+   *
+   *  @param name The name of the metric
+   *  @param help The help string of the metric
+   */
+  public static Builder build(String name, String help) {
+    return new Builder().name(name).help(help);
   }
 
   /**
@@ -135,17 +146,25 @@ public class Counter extends SimpleCollector<Counter.Child> {
   public void inc(double amt) {
     noLabelsChild.inc(amt);
   }
+  
+  /**
+   * Get the value of the counter.
+   */
+  public double get() {
+    return noLabelsChild.get();
+  }
 
   @Override
   public List<MetricFamilySamples> collect() {
-    List<MetricFamilySamples.Sample> samples = new ArrayList<MetricFamilySamples.Sample>();
+    List<MetricFamilySamples.Sample> samples = new ArrayList<MetricFamilySamples.Sample>(children.size());
     for(Map.Entry<List<String>, Child> c: children.entrySet()) {
       samples.add(new MetricFamilySamples.Sample(fullname, labelNames, c.getKey(), c.getValue().get()));
     }
-    MetricFamilySamples mfs = new MetricFamilySamples(fullname, Type.COUNTER, help, samples);
+    return familySamplesList(Type.COUNTER, samples);
+  }
 
-    List<MetricFamilySamples> mfsList = new ArrayList<MetricFamilySamples>();
-    mfsList.add(mfs);
-    return mfsList;
+  @Override
+  public List<MetricFamilySamples> describe() {
+    return Collections.<MetricFamilySamples>singletonList(new CounterMetricFamily(fullname, help, labelNames));
   }
 }

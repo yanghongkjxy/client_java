@@ -1,19 +1,22 @@
 package io.prometheus.client.hotspot;
 
-import com.sun.management.OperatingSystemMXBean;
-import com.sun.management.UnixOperatingSystemMXBean;
+import io.prometheus.client.Collector;
+import io.prometheus.client.CounterMetricFamily;
+import io.prometheus.client.GaugeMetricFamily;
+
 import java.io.BufferedReader;
+import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.FileNotFoundException;
-import java.lang.management.RuntimeMXBean;
 import java.lang.management.ManagementFactory;
+import java.lang.management.OperatingSystemMXBean;
+import java.lang.management.RuntimeMXBean;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
+import java.util.logging.Level;
 import java.util.logging.Logger;
-
-import io.prometheus.client.Collector;
 
 /**
  * Exports the standard exports common across all prometheus clients.
@@ -33,12 +36,11 @@ public class StandardExports extends Collector {
   private final StatusReader statusReader;
   private final OperatingSystemMXBean osBean;
   private final RuntimeMXBean runtimeBean;
-  private final boolean unix;
   private final boolean linux;
 
   public StandardExports() {
     this(new StatusReader(),
-         (OperatingSystemMXBean)ManagementFactory.getOperatingSystemMXBean(),
+         ManagementFactory.getOperatingSystemMXBean(),
          ManagementFactory.getRuntimeMXBean());
   }
 
@@ -46,46 +48,98 @@ public class StandardExports extends Collector {
       this.statusReader = statusReader;
       this.osBean = osBean;
       this.runtimeBean = runtimeBean;
-      this.unix = (osBean instanceof UnixOperatingSystemMXBean);
       this.linux = (osBean.getName().indexOf("Linux") == 0);
-  }
-
-  private static MetricFamilySamples singleMetric(String name, Type type, String help, double value) {
-    List<MetricFamilySamples.Sample> samples = Collections.singletonList(
-        new MetricFamilySamples.Sample(name, Collections.<String>emptyList(), Collections.<String>emptyList(), value));
-    return new MetricFamilySamples(name, type, help, samples);
   }
 
   private final static double KB = 1024;
 
+  @Override
   public List<MetricFamilySamples> collect() {
     List<MetricFamilySamples> mfs = new ArrayList<MetricFamilySamples>();
 
-    mfs.add(singleMetric("process_cpu_seconds_total", Type.COUNTER, "Total user and system CPU time spent in seconds.",
-        osBean.getProcessCpuTime() / NANOSECONDS_PER_SECOND));
+    try {
+      // There exist at least 2 similar but unrelated UnixOperatingSystemMXBean interfaces, in
+      // com.sun.management and com.ibm.lang.management. Hence use reflection and recursively go
+      // through implemented interfaces until the method can be made accessible and invoked.
+      Long processCpuTime = callLongGetter("getProcessCpuTime", osBean);
+      mfs.add(new CounterMetricFamily("process_cpu_seconds_total", "Total user and system CPU time spent in seconds.",
+          processCpuTime / NANOSECONDS_PER_SECOND));
+    }
+    catch (Exception e) {
+      LOGGER.log(Level.FINE,"Could not access process cpu time", e);
+    }
 
-    mfs.add(singleMetric("process_start_time_seconds", Type.GAUGE, "Start time of the process since unix epoch in seconds.",
+    mfs.add(new GaugeMetricFamily("process_start_time_seconds", "Start time of the process since unix epoch in seconds.",
         runtimeBean.getStartTime() / MILLISECONDS_PER_SECOND));
 
-    if (unix) {
-      UnixOperatingSystemMXBean unixBean = (UnixOperatingSystemMXBean) osBean;
-      mfs.add(singleMetric("process_open_fds", Type.GAUGE, "Number of open file descriptors.",
-          unixBean.getOpenFileDescriptorCount()));
-      mfs.add(singleMetric("process_max_fds", Type.GAUGE, "Maximum number of open file descriptors.",
-          unixBean.getMaxFileDescriptorCount()));
+    // There exist at least 2 similar but unrelated UnixOperatingSystemMXBean interfaces, in
+    // com.sun.management and com.ibm.lang.management. Hence use reflection and recursively go
+    // through implemented interfaces until the method can be made accessible and invoked.
+    try {
+      Long openFdCount = callLongGetter("getOpenFileDescriptorCount", osBean);
+      mfs.add(new GaugeMetricFamily(
+          "process_open_fds", "Number of open file descriptors.", openFdCount));
+      Long maxFdCount = callLongGetter("getMaxFileDescriptorCount", osBean);
+      mfs.add(new GaugeMetricFamily(
+          "process_max_fds", "Maximum number of open file descriptors.", maxFdCount));
+    } catch (Exception e) {
+      // Ignore, expected on non-Unix OSs.
     }
 
     // There's no standard Java or POSIX way to get memory stats,
     // so add support for just Linux for now.
     if (linux) {
       try {
-      collectMemoryMetricsLinux(mfs);
+        collectMemoryMetricsLinux(mfs);
       } catch (Exception e) {
         // If the format changes, log a warning and return what we can.
         LOGGER.warning(e.toString());
       }
     }
     return mfs;
+  }
+
+  static Long callLongGetter(String getterName, Object obj)
+      throws NoSuchMethodException, InvocationTargetException {
+    return callLongGetter(obj.getClass().getMethod(getterName), obj);
+  }
+
+  /**
+   * Attempts to call a method either directly or via one of the implemented interfaces.
+   * <p>
+   * A Method object refers to a specific method declared in a specific class. The first invocation
+   * might happen with method == SomeConcreteClass.publicLongGetter() and will fail if
+   * SomeConcreteClass is not public. We then recurse over all interfaces implemented by
+   * SomeConcreteClass (or extended by those interfaces and so on) until we eventually invoke
+   * callMethod() with method == SomePublicInterface.publicLongGetter(), which will then succeed.
+   * <p>
+   * There is a built-in assumption that the method will never return null (or, equivalently, that
+   * it returns the primitive data type, i.e. {@code long} rather than {@code Long}). If this
+   * assumption doesn't hold, the method might be called repeatedly and the returned value will be
+   * the one produced by the last call.
+   */
+  static Long callLongGetter(Method method, Object obj) throws InvocationTargetException  {
+    try {
+      return (Long) method.invoke(obj);
+    } catch (IllegalAccessException e) {
+      // Expected, the declaring class or interface might not be public.
+    }
+
+    // Iterate over all implemented/extended interfaces and attempt invoking the method with the
+    // same name and parameters on each.
+    for (Class<?> clazz : method.getDeclaringClass().getInterfaces()) {
+      try {
+        Method interfaceMethod = clazz.getMethod(method.getName(), method.getParameterTypes());
+        Long result = callLongGetter(interfaceMethod, obj);
+        if (result != null) {
+          return result;
+        }
+      } catch (NoSuchMethodException e) {
+        // Expected, class might implement multiple, unrelated interfaces.
+      }
+    }
+
+    return null;
   }
 
   void collectMemoryMetricsLinux(List<MetricFamilySamples> mfs) {
@@ -97,11 +151,11 @@ public class StandardExports extends Collector {
       String line;
       while ((line = br.readLine()) != null) {
         if (line.startsWith("VmSize:")) {
-          mfs.add(singleMetric("process_virtual_memory_bytes", Type.GAUGE,
+          mfs.add(new GaugeMetricFamily("process_virtual_memory_bytes",
               "Virtual memory size in bytes.",
               Float.parseFloat(line.split("\\s+")[1]) * KB));
         } else if (line.startsWith("VmRSS:")) {
-          mfs.add(singleMetric("process_resident_memory_bytes", Type.GAUGE,
+          mfs.add(new GaugeMetricFamily("process_resident_memory_bytes",
               "Resident memory size in bytes.",
               Float.parseFloat(line.split("\\s+")[1]) * KB));
         }

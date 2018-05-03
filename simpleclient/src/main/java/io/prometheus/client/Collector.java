@@ -1,7 +1,6 @@
 
 package io.prometheus.client;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -24,10 +23,11 @@ public abstract class Collector {
     GAUGE,
     SUMMARY,
     HISTOGRAM,
+    UNTYPED,
   }
 
   /**
-   * A metric, and all of it's samples.
+   * A metric, and all of its samples.
    */
   static public class MetricFamilySamples {
     public final String name;
@@ -44,7 +44,7 @@ public abstract class Collector {
 
     @Override
     public boolean equals(Object obj) {
-      if (obj == null || !(obj instanceof MetricFamilySamples)) {
+      if (!(obj instanceof MetricFamilySamples)) {
         return false;
       }
       MetricFamilySamples other = (MetricFamilySamples) obj;
@@ -77,22 +77,30 @@ public abstract class Collector {
       public final List<String> labelNames;
       public final List<String> labelValues;  // Must have same length as labelNames.
       public final double value;
+      public final Long timestampMs;  // It's an epoch format with milliseconds value included (this field is subject to change).
 
-      public Sample(String name, List<String> labelNames, List<String> labelValues, double value) {
+      public Sample(String name, List<String> labelNames, List<String> labelValues, double value, Long timestampMs) {
         this.name = name;
         this.labelNames = labelNames;
         this.labelValues = labelValues;
         this.value = value;
+        this.timestampMs = timestampMs;
+      }
+
+      public Sample(String name, List<String> labelNames, List<String> labelValues, double value) {
+    	  this(name, labelNames, labelValues, value, null);
       }
 
       @Override
       public boolean equals(Object obj) {
-        if (obj == null || !(obj instanceof Sample)) {
+        if (!(obj instanceof Sample)) {
           return false;
         }
         Sample other = (Sample) obj;
+
         return other.name.equals(name) && other.labelNames.equals(labelNames)
-          && other.labelValues.equals(labelValues) && other.value == value;
+          && other.labelValues.equals(labelValues) && other.value == value
+          && ((timestampMs == null && other.timestampMs == null) || (other.timestampMs != null) && (other.timestampMs.equals(timestampMs)));
       }
 
       @Override
@@ -103,13 +111,16 @@ public abstract class Collector {
         hash = 37 * hash + labelValues.hashCode();
         long d = Double.doubleToLongBits(value);
         hash = 37 * hash + (int)(d ^ (d >>> 32));
+        if (timestampMs != null) {
+          hash = 37 * hash + timestampMs.hashCode();
+        }
         return hash;
       }
 
       @Override
       public String toString() {
         return "Name: " + name + " LabelNames: " + labelNames + " labelValues: " + labelValues +
-          " Value: " + value;
+          " Value: " + value + " TimestampMs: " + timestampMs;
       }
     }
   }
@@ -128,6 +139,25 @@ public abstract class Collector {
     registry.register(this);
     return (T)this;
   }
+
+  public interface Describable {
+    /**
+     *  Provide a list of metric families this Collector is expected to return.
+     *
+     *  These should exclude the samples. This is used by the registry to
+     *  detect collisions and duplicate registrations.
+     *
+     *  Usually custom collectors do not have to implement Describable. If
+     *  Describable is not implemented and the CollectorRegistry was created
+     *  with auto describe enabled (which is the case for the default registry)
+     *  then {@link collect} will be called at registration time instead of
+     *  describe. If this could cause problems, either implement a proper
+     *  describe, or if that's not practical have describe return an empty
+     *  list.
+     */
+    List<MetricFamilySamples> describe();
+  }
+
 
   /* Various utility functions for implementing Collectors. */
 
@@ -153,6 +183,18 @@ public abstract class Collector {
     }
   }
 
+  private static final Pattern SANITIZE_PREFIX_PATTERN = Pattern.compile("^[^a-zA-Z_]");
+  private static final Pattern SANITIZE_BODY_PATTERN = Pattern.compile("[^a-zA-Z0-9_]");
+
+  /**
+   * Sanitize metric name
+   */
+  public static String sanitizeMetricName(String metricName) {
+    return SANITIZE_BODY_PATTERN.matcher(
+            SANITIZE_PREFIX_PATTERN.matcher(metricName).replaceFirst("_")
+    ).replaceAll("_");
+  }
+
   /**
    * Throw an exception if the metric label name is invalid.
    */
@@ -166,7 +208,7 @@ public abstract class Collector {
   }
 
   /**
-   * Convert a double to it's string representation in Go.
+   * Convert a double to its string representation in Go.
    */
   public static String doubleToGoString(double d) {
     if (d == Double.POSITIVE_INFINITY) {
@@ -174,6 +216,9 @@ public abstract class Collector {
     } 
     if (d == Double.NEGATIVE_INFINITY) {
       return "-Inf";
+    }
+    if (Double.isNaN(d)) {
+      return "NaN";
     }
     return Double.toString(d);
   }

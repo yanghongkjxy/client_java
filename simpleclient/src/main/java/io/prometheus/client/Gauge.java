@@ -1,8 +1,11 @@
 package io.prometheus.client;
 
+import java.io.Closeable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 /**
  * Gauge metric, to report instantaneous values.
@@ -57,11 +60,11 @@ import java.util.Map;
  * }
  * </pre>
  * <p>
- * These can be aggregated and processed together much more easily in the Prometheus 
+ * These can be aggregated and processed together much more easily in the Prometheus
  * server than individual metrics for each labelset.
  */
-public class Gauge extends SimpleCollector<Gauge.Child> {
-  
+public class Gauge extends SimpleCollector<Gauge.Child> implements Collector.Describable {
+
   Gauge(Builder b) {
     super(b);
   }
@@ -71,6 +74,16 @@ public class Gauge extends SimpleCollector<Gauge.Child> {
     public Gauge create() {
       return new Gauge(this);
     }
+  }
+
+  /**
+   *  Return a Builder to allow configuration of a new Gauge. Ensures required fields are provided.
+   *
+   *  @param name The name of the metric
+   *  @param help The help string of the metric
+   */
+  public static Builder build(String name, String help) {
+    return new Builder().name(name).help(help);
   }
 
   /**
@@ -88,7 +101,7 @@ public class Gauge extends SimpleCollector<Gauge.Child> {
    /**
     * Represents an event being timed.
     */
-   public static class Timer {
+   public static class Timer implements Closeable {
      private final Child child;
      private final long start;
      private Timer(Child child) {
@@ -104,6 +117,14 @@ public class Gauge extends SimpleCollector<Gauge.Child> {
        child.set(elapsed);
        return elapsed;
      }
+
+     /**
+      * Equivalent to calling {@link #setDuration()}.
+      */
+     @Override
+     public void close() {
+       setDuration();
+     }
    }
 
   /**
@@ -116,6 +137,7 @@ public class Gauge extends SimpleCollector<Gauge.Child> {
     private final DoubleAdder value = new DoubleAdder();
 
     static TimeProvider timeProvider = new TimeProvider();
+
     /**
      * Increment the gauge by 1.
      */
@@ -170,6 +192,44 @@ public class Gauge extends SimpleCollector<Gauge.Child> {
     public Timer startTimer() {
       return new Timer(this);
     }
+
+    /**
+     * Executes runnable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+     *
+     * @param timeable Code that is being timed
+     * @return Measured duration in seconds for timeable to complete.
+     */
+    public double setToTime(Runnable timeable){
+      Timer timer = startTimer();
+
+      double elapsed;
+      try {
+        timeable.run();
+      } finally {
+        elapsed = timer.setDuration();
+      }
+
+      return elapsed;
+    }
+
+    /**
+     * Executes callable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+     *
+     * @param timeable Code that is being timed
+     * @return Result returned by callable.
+     */
+    public <E> E setToTime(Callable<E> timeable){
+      Timer timer = startTimer();
+
+      try {
+        return timeable.call();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      } finally {
+        timer.setDuration();
+      }
+    }
+
     /**
      * Get the value of the gauge.
      */
@@ -230,17 +290,45 @@ public class Gauge extends SimpleCollector<Gauge.Child> {
     return noLabelsChild.startTimer();
   }
 
+  /**
+   * Executes runnable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+   *
+   * @param timeable Code that is being timed
+   * @return Measured duration in seconds for timeable to complete.
+   */
+  public double setToTime(Runnable timeable){
+    return noLabelsChild.setToTime(timeable);
+  }
+
+  /**
+   * Executes callable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+   *
+   * @param timeable Code that is being timed
+   * @return Result returned by callable.
+   */
+  public <E> E setToTime(Callable<E> timeable){
+    return noLabelsChild.setToTime(timeable);
+  }
+
+  /**
+   * Get the value of the gauge.
+   */
+  public double get() {
+    return noLabelsChild.get();
+  }
+
   @Override
   public List<MetricFamilySamples> collect() {
-    List<MetricFamilySamples.Sample> samples = new ArrayList<MetricFamilySamples.Sample>();
+    List<MetricFamilySamples.Sample> samples = new ArrayList<MetricFamilySamples.Sample>(children.size());
     for(Map.Entry<List<String>, Child> c: children.entrySet()) {
       samples.add(new MetricFamilySamples.Sample(fullname, labelNames, c.getKey(), c.getValue().get()));
     }
-    MetricFamilySamples mfs = new MetricFamilySamples(fullname, Type.GAUGE, help, samples);
+    return familySamplesList(Type.GAUGE, samples);
+  }
 
-    List<MetricFamilySamples> mfsList = new ArrayList<MetricFamilySamples>();
-    mfsList.add(mfs);
-    return mfsList;
+  @Override
+  public List<MetricFamilySamples> describe() {
+    return Collections.<MetricFamilySamples>singletonList(new GaugeMetricFamily(fullname, help, labelNames));
   }
 
   static class TimeProvider {

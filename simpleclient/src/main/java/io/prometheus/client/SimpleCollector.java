@@ -1,5 +1,6 @@
 package io.prometheus.client;
 
+import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.Arrays;
@@ -11,7 +12,7 @@ import java.util.List;
  * This class handles common initialization and label logic for the standard metrics.
  * You should never subclass this class.
  * <p>
- * <h2>Initilization</h2>
+ * <h2>Initialization</h2>
  * After calling build() on a subclass, {@link Builder#name(String) name},
  * {@link SimpleCollector.Builder#help(String) help},
  * {@link SimpleCollector.Builder#labelNames(String...) labelNames},
@@ -26,17 +27,17 @@ import java.util.List;
  * <h2>Labels</h2>
  * {@link SimpleCollector.Builder#labelNames labelNames} specifies which (if any) labels the metrics will have, and 
  * {@link #labels} returns the Child of the metric that represents that particular set of labels.
- * {@link Gauge}, {@link Counter} and {@link Summary} all offer convienence methods to avoid needing to call
+ * {@link Gauge}, {@link Counter} and {@link Summary} all offer convenience methods to avoid needing to call
  * {@link #labels} for metrics with no labels.
  * <p>
  * {@link #remove} and {@link #clear} can be used to remove children.
  * <p>
  * <em>Warning #1:</em> Metrics that don't always export something are difficult to monitor, if you know in advance
- * what labels will be in use you should initilise them be calling {@link #labels}.
+ * what labels will be in use you should initialise them be calling {@link #labels}.
  * This is done for you for metrics with no labels.
  * <p>
  * <em>Warning #2:</em> While labels are very powerful, avoid overly granular metric labels. 
- * The combinatorial explosion of breaking out a metric in many dimensions can produce huge numberts
+ * The combinatorial explosion of breaking out a metric in many dimensions can produce huge numbers
  * of timeseries, which will then take longer and more resources to process.
  * <p>
  * As a rule of thumb aim to keep the cardinality of metrics below ten, and limit where the
@@ -50,7 +51,7 @@ public abstract class SimpleCollector<Child> extends Collector {
   protected final String help;
   protected final List<String> labelNames;
 
-  protected final ConcurrentMap<List<String>, Child> children = new ConcurrentHashMap<List<String>, Child>();;
+  protected final ConcurrentMap<List<String>, Child> children = new ConcurrentHashMap<List<String>, Child>();
   protected Child noLabelsChild;
 
   /**
@@ -72,8 +73,9 @@ public abstract class SimpleCollector<Child> extends Collector {
     if (c != null) {
       return c;
     }
-    children.putIfAbsent(key, newChild());
-    return children.get(key);
+    Child c2 = newChild();
+    Child tmp = children.putIfAbsent(key, c2);
+    return tmp == null ? c2 : tmp;
   }
 
   /**
@@ -100,7 +102,7 @@ public abstract class SimpleCollector<Child> extends Collector {
    * Initialize the child with no labels.
    */
   protected void initializeNoLabelsChild() {
-    // Initlize metric if it has no labels.
+    // Initialize metric if it has no labels.
     if (labelNames.size() == 0) {
       noLabelsChild = labels();
     }
@@ -141,6 +143,13 @@ public abstract class SimpleCollector<Child> extends Collector {
    * Return a new child, workaround for Java generics limitations.
    */
   protected abstract Child newChild();
+
+  protected List<MetricFamilySamples> familySamplesList(Collector.Type type, List<MetricFamilySamples.Sample> samples) {
+    MetricFamilySamples mfs = new MetricFamilySamples(fullname, type, help, samples);
+    List<MetricFamilySamples> mfsList = new ArrayList<MetricFamilySamples>(1);
+    mfsList.add(mfs);
+    return mfsList;
+  }
 
   protected SimpleCollector(Builder b) {
     if (b.name.isEmpty()) throw new IllegalStateException("Name hasn't been set.");

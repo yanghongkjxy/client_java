@@ -1,8 +1,11 @@
 package io.prometheus.client;
 
+import java.io.Closeable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 /**
  * Histogram metric, to track distributions of events.
@@ -15,7 +18,7 @@ import java.util.Map;
  * <p>
  * <em>Note:</em> Each bucket is one timeseries. Many buckets and/or many dimensions with labels
  * can produce large amount of time series, that may cause performance problems.
- * 
+ *
  * <p>
  * The default buckets are intended to cover a typical web/rpc request from milliseconds to seconds.
  * <p>
@@ -26,13 +29,20 @@ import java.util.Map;
  *     static final Histogram requestLatency = Histogram.build()
  *         .name("requests_latency_seconds").help("Request latency in seconds.").register();
  *
- *     void processRequest(Request req) {  
+ *     void processRequest(Request req) {
  *        Histogram.Timer requestTimer = requestLatency.startTimer();
  *        try {
  *          // Your code here.
  *        } finally {
  *          requestTimer.observeDuration();
  *        }
+ *     }
+ *
+ *     // Or if using Java 8 lambdas.
+ *     void processRequestLambda(Request req) {
+ *        requestLatency.time(() -> {
+ *          // Your code here.
+ *        });
  *     }
  *   }
  * }
@@ -50,7 +60,7 @@ import java.util.Map;
  * {@link Histogram.Builder#exponentialBuckets(double, double, int) exponentialBuckets}
  * offer easy ways to set common bucket patterns.
  */
-public class Histogram extends SimpleCollector<Histogram.Child> {
+public class Histogram extends SimpleCollector<Histogram.Child> implements Collector.Describable {
   private final double[] buckets;
 
   Histogram(Builder b) {
@@ -89,7 +99,7 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
       dontInitializeNoLabelsChild = true;
       return new Histogram(this);
     }
-   
+
     /**
       * Set the upper bounds of buckets for the histogram.
       */
@@ -118,7 +128,17 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
       }
       return this;
     }
-    
+
+  }
+
+  /**
+   *  Return a Builder to allow configuration of a new Histogram. Ensures required fields are provided.
+   *
+   *  @param name The name of the metric
+   *  @param help The help string of the metric
+   */
+  public static Builder build(String name, String help) {
+    return new Builder().name(name).help(help);
   }
 
   /**
@@ -136,21 +156,29 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
   /**
    * Represents an event being timed.
    */
-  public static class Timer {
+  public static class Timer implements Closeable {
     private final Child child;
     private final long start;
-    private Timer(Child child) {
+    private Timer(Child child, long start) {
       this.child = child;
-      start = Child.timeProvider.nanoTime();
+      this.start = start;
     }
     /**
      * Observe the amount of time in seconds since {@link Child#startTimer} was called.
      * @return Measured duration in seconds since {@link Child#startTimer} was called.
      */
     public double observeDuration() {
-        double elapsed = (Child.timeProvider.nanoTime() - start) / NANOSECONDS_PER_SECOND;
+        double elapsed = SimpleTimer.elapsedSecondsFromNanos(start, SimpleTimer.defaultTimeProvider.nanoTime());
         child.observe(elapsed);
         return elapsed;
+    }
+
+    /**
+     * Equivalent to calling {@link #observeDuration()}.
+     */
+    @Override
+    public void close() {
+      observeDuration();
     }
   }
 
@@ -161,6 +189,43 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
    * {@link SimpleCollector#remove} or {@link SimpleCollector#clear}.
    */
   public static class Child {
+
+    /**
+     * Executes runnable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+     *
+     * @param timeable Code that is being timed
+     * @return Measured duration in seconds for timeable to complete.
+     */
+    public double time(Runnable timeable) {
+      Timer timer = startTimer();
+
+      double elapsed;
+      try {
+        timeable.run();
+      } finally {
+        elapsed = timer.observeDuration();
+      }
+      return elapsed;
+    }
+
+    /**
+     * Executes callable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+     *
+     * @param timeable Code that is being timed
+     * @return Result returned by callable.
+     */
+    public <E> E time(Callable<E> timeable) {
+      Timer timer = startTimer();
+
+      try {
+        return timeable.call();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      } finally {
+        timer.observeDuration();
+      }
+    }
+
     public static class Value {
       public final double sum;
       public final double[] buckets;
@@ -182,7 +247,7 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
     private final DoubleAdder[] cumulativeCounts;
     private final DoubleAdder sum = new DoubleAdder();
 
-    static TimeProvider timeProvider = new TimeProvider();
+
     /**
      * Observe the given amount.
      */
@@ -202,7 +267,7 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
      * Call {@link Timer#observeDuration} at the end of what you want to measure the duration of.
      */
     public Timer startTimer() {
-      return new Timer(this);
+      return new Timer(this, SimpleTimer.defaultTimeProvider.nanoTime());
     }
     /**
      * Get the value of the Histogram.
@@ -236,6 +301,26 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
     return noLabelsChild.startTimer();
   }
 
+  /**
+   * Executes runnable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+   *
+   * @param timeable Code that is being timed
+   * @return Measured duration in seconds for timeable to complete.
+   */
+  public double time(Runnable timeable){
+    return noLabelsChild.time(timeable);
+  }
+
+  /**
+   * Executes callable code (e.g. a Java 8 Lambda) and observes a duration of how long it took to run.
+   *
+   * @param timeable Code that is being timed
+   * @return Result returned by callable.
+   */
+  public <E> E time(Callable<E> timeable){
+    return noLabelsChild.time(timeable);
+  }
+
   @Override
   public List<MetricFamilySamples> collect() {
     List<MetricFamilySamples.Sample> samples = new ArrayList<MetricFamilySamples.Sample>();
@@ -252,19 +337,18 @@ public class Histogram extends SimpleCollector<Histogram.Child> {
       samples.add(new MetricFamilySamples.Sample(fullname + "_sum", labelNames, c.getKey(), v.sum));
     }
 
-    MetricFamilySamples mfs = new MetricFamilySamples(fullname, Type.HISTOGRAM, help, samples);
-    List<MetricFamilySamples> mfsList = new ArrayList<MetricFamilySamples>();
-    mfsList.add(mfs);
-    return mfsList;
+    return familySamplesList(Type.HISTOGRAM, samples);
+  }
+
+  @Override
+  public List<MetricFamilySamples> describe() {
+    return Collections.singletonList(
+            new MetricFamilySamples(fullname, Type.HISTOGRAM, help, Collections.<MetricFamilySamples.Sample>emptyList()));
   }
 
   double[] getBuckets() {
     return buckets;
   }
 
-  static class TimeProvider {
-    long nanoTime() {
-      return System.nanoTime();
-    }
-  }
+
 }

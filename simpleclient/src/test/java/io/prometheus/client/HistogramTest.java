@@ -2,9 +2,13 @@ package io.prometheus.client;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -24,7 +28,7 @@ public class HistogramTest {
 
   @After
   public void tearDown() {
-    Histogram.Child.timeProvider = new Histogram.TimeProvider();
+    SimpleTimer.defaultTimeProvider = new SimpleTimer.TimeProvider();
   }
 
   private double getCount() {
@@ -34,11 +38,11 @@ public class HistogramTest {
     return registry.getSampleValue("nolabels_sum").doubleValue();
   }
   private double getBucket(double b) {
-    return registry.getSampleValue("nolabels_bucket", 
+    return registry.getSampleValue("nolabels_bucket",
         new String[]{"le"},
         new String[]{Collector.doubleToGoString(b)}).doubleValue();
   }
-  
+
   @Test
   public void testObserve() {
     noLabels.observe(2);
@@ -100,26 +104,43 @@ public class HistogramTest {
 
   @Test
   public void testTimer() {
-    Histogram.Child.timeProvider = new Histogram.TimeProvider() {
+    SimpleTimer.defaultTimeProvider = new SimpleTimer.TimeProvider() {
       long value = (long)(30 * 1e9);
       long nanoTime() {
         value += (long)(10 * 1e9);
         return value;
       }
     };
+
+    double elapsed = noLabels.time(new Runnable() {
+      @Override
+      public void run() {
+        //no op
+      }
+    });
+    assertEquals(10, elapsed, .001);
+
+    int result = noLabels.time(new Callable<Integer>() {
+      @Override
+      public Integer call() {
+        return 123;
+      }
+    });
+    assertEquals(123, result);
+
     Histogram.Timer timer = noLabels.startTimer();
-    double elapsed = timer.observeDuration();
-    assertEquals(1, getCount(), .001);
-    assertEquals(10, getSum(), .001);
+    elapsed = timer.observeDuration();
+    assertEquals(3, getCount(), .001);
+    assertEquals(30, getSum(), .001);
     assertEquals(10, elapsed, .001);
   }
-  
+
   @Test
   public void noLabelsDefaultZeroValue() {
     assertEquals(0.0, getCount(), .001);
     assertEquals(0.0, getSum(), .001);
   }
-  
+
   private Double getLabelsCount(String labelValue) {
     return registry.getSampleValue("labels_count", new String[]{"l"}, new String[]{labelValue});
   }
@@ -154,7 +175,7 @@ public class HistogramTest {
   public void testCollect() {
     labels.labels("a").observe(2);
     List<Collector.MetricFamilySamples> mfs = labels.collect();
-    
+
     ArrayList<Collector.MetricFamilySamples.Sample> samples = new ArrayList<Collector.MetricFamilySamples.Sample>();
     ArrayList<String> labelNames = new ArrayList<String>();
     labelNames.add("l");
@@ -178,6 +199,19 @@ public class HistogramTest {
 
     assertEquals(1, mfs.size());
     assertEquals(mfsFixture, mfs.get(0));
+  }
+
+  @Test
+  public void testChildAndValuePublicApi() throws Exception {
+    assertTrue(Modifier.isPublic(Histogram.Child.class.getModifiers()));
+
+    final Method getMethod = Histogram.Child.class.getMethod("get");
+    assertTrue(Modifier.isPublic(getMethod.getModifiers()));
+    assertEquals(Histogram.Child.Value.class, getMethod.getReturnType());
+
+    assertTrue(Modifier.isPublic(Histogram.Child.Value.class.getModifiers()));
+    assertTrue(Modifier.isPublic(Histogram.Child.Value.class.getField("sum").getModifiers()));
+    assertTrue(Modifier.isPublic(Histogram.Child.Value.class.getField("buckets").getModifiers()));
   }
 
 }
